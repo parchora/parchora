@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/parchora-app",
+    "crates/parchora-ui",
+    "crates/parchora-core",
+    "crates/parchora-db",
+    "crates/parchora-files",
+    "crates/parchora-capture",
+    "crates/parchora-platform",
+]
+exclude = ["spikes", "vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# DEC-197：发布档瘦身（L1 实测：release 二进制 33.2→27.9MB，叠加打包脚本 strip
+# 后 22.5MB）。不设 panic="abort"（运行时语义变更需单独立项评估）；不降 opt-level
+# （铁律 12 性能优先，min-size 档与 GUI 帧耗时目标冲突）。
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# DEC-59：gpui-fast 0.1.8 线 vendored（park_offscreen 原语）。
+# 对 workspace 全体成员生效；vendor 为 pristine 135a88c。
+[patch.crates-io]
+gpui-fast = { path = "vendor/gpui-fast" }
+gpui-fast-macos = { path = "vendor/gpui-fast-macos" }
+# DEC-150：zorite-editor 0.11.2 线 vendored（MIT · gpui-pre 上游快照同款 API 面，
+# spike 实证零 API 漂移于 gpui-fast 0.1.8）。patch 层 = manifest 仅翻转 gpui
+# 依赖包名 gpui-pre → gpui-fast（三 crate · 源码零改动），单 gpui 图保持。
+zorite-editor = { path = "vendor/zorite-editor" }
+zorite-markdown = { path = "vendor/zorite-markdown" }
+gpui-bidi = { path = "vendor/gpui-bidi" }

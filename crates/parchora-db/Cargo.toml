@@ -1,0 +1,15 @@
+[package]
+name = "parchora-db"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# 选型与引入授权：design §2.2（rusqlite bundled + rusqlite_migration）——
+# 规范 9 例外成立：SQLite 存储无法以 std 内建实现，「不引入则功能无法实现」。
+rusqlite = { version = "0.34", features = ["bundled"] }
+# 版本配对（DEC-89）：rusqlite_migration 2.0.0 → rusqlite ^0.34（libsqlite3-sys 单一 links），
+# 直依赖与迁移器必须同线，否则 libsqlite3-sys 双版本 links 冲突。
+rusqlite_migration = "2"
+# clips/todos CRUD 投影类型（TASK-300 · DEC-187 分层登记）：core 类型即 design
+# §3.2 持久化投影的唯一形态源，db 依赖 core 单向（core 不反向依赖 db）。
+parchora-core = { path = "../parchora-core" }

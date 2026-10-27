@@ -1,0 +1,22 @@
+[package]
+name = "zorite-spike"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+# Phase A：registry 原始依赖图——仅用于 `cargo vendor` 收取 zorite 三 crate 源码。
+# vendor 收取后 Phase B 翻转 [dependencies] 指向 third-party/ 拷贝（gpui-pre → gpui-fast）。
+[dependencies]
+zorite-editor = { path = "third-party/zorite-editor" }
+
+
+gpui-fast = "0.1.8"
+gpui-fast-platform = { version = "0.1.8", features = ["runtime_shaders", "font-kit"] }
+
+# [冲突#10] 沿 DEC-59 裁决：gpui-fast 0.1.8 线 vendored pristine（../../vendor）。
+[patch.crates-io]
+gpui-fast = { path = "../../vendor/gpui-fast" }
+gpui-fast-macos = { path = "../../vendor/gpui-fast-macos" }
+zorite-markdown = { path = "third-party/zorite-markdown" }
+gpui-bidi = { path = "third-party/gpui-bidi" }

@@ -1,0 +1,26 @@
+[package]
+name = "parchora-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# gpui-fast 0.1.8 线（DEC-59）：lib 名即 `gpui`，workspace 根 patch 指向 app/vendor 双 crate。
+gpui-fast = "0.1.8"
+# 输入引擎（TASK-504 · 第七十八轮）：gpui-component 0.7.3（editor-spike 真机验证同线·
+# gpui-fast feature 与 vendored 0.1.8 统一；规范 9 论证见 DEC-127——自研含 IME 的输入
+# 引擎不可行，用户修复指令＋spike 在册即引入授权）。
+gpui-component = { version = "0.7.3", features = ["gpui-fast"] }
+# Markdown 编辑与实时渲染引擎（DEC-150 · 用户指令换道 zorite）：zorite-editor 0.11.2
+# vendored 于 app/vendor（patch 层仅翻转 gpui 依赖包名至 gpui-fast 线）；替换
+# pulldown-cmark 封装与 DEC-147 呈现层，编辑/渲染能力由 zorite 承载。
+zorite-editor = "0.11.2"
+# Markdown 只读渲染视图（DEC-156 · Peek 内容详情面板阅读态）：zorite-markdown
+# 0.10.0 同批 vendored（workspace [patch.crates-io] 既有映射 · DEC-150 一揽子
+# 授权面内）——zorite-editor 的姊妹 crate，阅读视图 MarkdownView 与编辑器共享
+# 同一 syntax 解析模块（REQ-PREVIEW-PIPELINE 同一渲染管线的合规承载）；直依
+# 为复用 vendored 面，零新增外部依赖。
+zorite-markdown = "0.10"
+
+[dev-dependencies]
+# 进程内确定性仿真（HoverGate 延迟/宽限/gen 失效集成测试）——仅测试构建生效。
+gpui-fast = { version = "0.1.8", features = ["test-support"] }
