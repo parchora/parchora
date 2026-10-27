@@ -1,0 +1,1 @@
+app/crates/parchora-app/assets/legacy/README.md：DEC-160 换装前旧品牌资产备份 · 仅回退取证用 · 无构建引用 · 出处见 docs/产品交付/统一产品方案/协作记录/decisions.md DEC-160

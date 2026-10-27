@@ -1,0 +1,16 @@
+[package]
+name = "parchora-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# 规范 9 论证（DEC-63）：serde=类型层序列化契约（M14 导出 / DB serde 投影）；uuid=三态实体 id 与 C7 收敛的域类型；
+# v4 feature（DEC-187）：实体 id 生成（new_uuid 唯一入口）——uuid 既有受控依赖的能力开启，传递引入 getrandom（macOS 用 Security.framework SecRandom 系），非新增三方包主体。
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+# pulldown-cmark 已随 DEC-150 移除（用户指令换道 zorite-editor）：markdown 解析/渲染
+# 承担点迁至 parchora-ui 的 zorite-editor（vendored，见 app/Cargo.toml patch 注）。
+
+[dev-dependencies]
+# 规范 9 论证（DEC-63）：TASK-108 验证列要求「serde roundtrip 断言」——真实 JSON 断言必需 serde_json（M14 导出格式），serde 自身无法产出 JSON；与 serde 同源同版本轴
+serde_json = "1"

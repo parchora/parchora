@@ -1,0 +1,133 @@
+diff --git a/gpui-fast-macos/src/window.rs b/gpui-fast-macos/src/window.rs
+index 262a59e..0f5fb5f 100644
+--- a/gpui-fast-macos/src/window.rs
++++ b/gpui-fast-macos/src/window.rs
+@@ -711,6 +711,8 @@ pub(crate) struct MacWindowState {
+     select_previous_tab_callback: Option<Box<dyn FnMut()>>,
+     toggle_tab_bar_callback: Option<Box<dyn FnMut()>>,
+     activated_least_once: bool,
++    // Vendored (DEC-59)：停放屏外时的原 frame 缓存，unpark 用 setFrame:display: 全量还原。
++    parked_frame: Option<Objc2NSRect>,
+     closed: Arc<AtomicBool>,
+     accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
+     // The parent window if this window is a sheet (Dialog kind)
+@@ -1151,6 +1153,7 @@ impl MacWindow {
+                 select_previous_tab_callback: None,
+                 toggle_tab_bar_callback: None,
+                 activated_least_once: false,
++                parked_frame: None,
+                 closed: Arc::new(AtomicBool::new(false)),
+                 accesskit_adapter: None,
+                 sheet_parent: None,
+@@ -1462,6 +1465,39 @@ impl PlatformWindow for MacWindow {
+             .detach();
+     }
+ 
++    fn park_offscreen(&mut self, park: bool) {
++        // Vendored (DEC-59)：与下方 activate() 同一 async + closed 守卫模式；
++        // -32000/-31000 为经典屏外停放点，unpark 用 setFrame:display: 全量还原（位置+尺寸）。
++        // 锁纪律：AppKit setFrame* 会同步回调 NSWindowDelegate（didMove/didResize），
++        // delegate 亦会 lock 同一 MacWindowState——objc 调用一律不得持锁执行，
++        // 否则同线程重入 parking_lot Mutex 即主队列死锁（真机 spike 已复现）。
++        let this = Arc::clone(&self.0);
++        let window = this.lock().native_window;
++        let closed = this.lock().closed.clone();
++        let executor = this.lock().foreground_executor.clone();
++        executor
++            .spawn(async move {
++                if closed.load(Ordering::Acquire) {
++                    return;
++                }
++                let window = unsafe { &*window.cast::<Objc2NSWindow>() };
++                if park {
++                    let frame = window.frame();
++                    window.setFrameOrigin(Objc2NSPoint::new(-32000., -31000.));
++                    this.lock().parked_frame = Some(frame);
++                } else {
++                    // 注意：临时 guard 只允许跨 take() 本身，不得横跨 setFrame——
++                    // if let Some(f) = this.lock().x.take() { objc(...) } 的 guard
++                    // 生存期会延伸到 else 分支结束，重入 delegate 锁即死锁。
++                    let frame = this.lock().parked_frame.take();
++                    if let Some(frame) = frame {
++                        window.setFrame_display(frame, true);
++                    }
++                }
++            })
++            .detach();
++    }
++
+     fn merge_all_windows(&self) {
+         let native_window = self.0.lock().native_window;
+         extern "C" fn merge_windows_async(context: *mut std::ffi::c_void) {
+diff --git a/gpui-fast/src/platform.rs b/gpui-fast/src/platform.rs
+index 49c9b83..4b5fd48 100644
+--- a/gpui-fast/src/platform.rs
++++ b/gpui-fast/src/platform.rs
+@@ -37,13 +37,13 @@ pub(crate) type PlatformScreenCaptureFrame =
+     objc2_core_foundation::CFRetained<objc2_core_video::CVImageBuffer>;
+ 
+ use crate::{
+-    Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
+-    DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
+-    FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
++    hash, point, px, size, Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor,
++    Bounds, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font, FontId,
++    FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
+     LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, Priority,
+     RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
+     ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea,
+-    hash, point, px, size,
++    DEFAULT_WINDOW_SIZE,
+ };
+ #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+ use anyhow::bail;
+@@ -51,9 +51,9 @@ use anyhow::{Context as _, Result};
+ use async_task::Runnable;
+ use collections::FxHashMap;
+ use futures::channel::oneshot;
++use image::codecs::gif::GifDecoder;
+ #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+ use image::RgbaImage;
+-use image::codecs::gif::GifDecoder;
+ use image::{AnimationDecoder as _, DynamicImage, Frame};
+ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+ use scheduler::Instant;
+@@ -1217,6 +1217,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+         false
+     }
+     fn resize(&mut self, size: Size<Pixels>);
++    /// Vendored (DEC-59)：停放/还原窗口——以停放屏外替代 orderOut/hide，保持 AppKit
++    /// key/space 语义（AGENTS.md：停放屏外、从不 orderOut）。
++    /// 默认空实现：产品为 macOS-only（DEC-36/37），其余后端零连带改动。
++    fn park_offscreen(&mut self, park: bool) {
++        let _ = park;
++    }
+     fn scale_factor(&self) -> f32;
+     fn appearance(&self) -> WindowAppearance;
+     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
+@@ -1539,7 +1545,7 @@ pub trait PlatformTextSystem: Send + Sync {
+     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout;
+     /// Returns the recommended text rendering mode for the given font and size.
+     fn recommended_rendering_mode(&self, _font_id: FontId, _font_size: Pixels)
+-    -> TextRenderingMode;
++        -> TextRenderingMode;
+     /// Returns the dilation level to use for a glyph painted in the given color.
+     fn glyph_dilation_for_color(&self, _color: Hsla) -> u8 {
+         0
+diff --git a/gpui-fast/src/window.rs b/gpui-fast/src/window.rs
+index 574a9ed..339402b 100644
+--- a/gpui-fast/src/window.rs
++++ b/gpui-fast/src/window.rs
+@@ -2914,6 +2914,12 @@ impl Window {
+         self.platform_window.resize(size);
+     }
+ 
++    /// 停放/还原窗口（vendored，DEC-59）：停放屏外而非 orderOut/hide，
++    /// 保持 AppKit key/space 语义（AGENTS.md：停放屏外、从不 orderOut）。
++    pub fn park_offscreen(&mut self, park: bool) {
++        self.platform_window.park_offscreen(park);
++    }
++
+     /// Returns whether or not the window is currently fullscreen
+     pub fn is_fullscreen(&self) -> bool {
+         self.platform_window.is_fullscreen()

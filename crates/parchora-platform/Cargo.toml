@@ -1,0 +1,9 @@
+[package]
+name = "parchora-platform"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# TASK-300 板面类型快照桥（REQ-CAPTURE-8TYPES 判定链的 core 类型直出）：
+# platform 依赖 core 单向（DEC-187 分层登记）；objc2 系独占边界不变。
+parchora-core = { path = "../parchora-core" }

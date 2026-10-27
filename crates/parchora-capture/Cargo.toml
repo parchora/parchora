@@ -1,0 +1,9 @@
+[package]
+name = "parchora-capture"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# TASK-300 判定链复用（REQ-CAPTURE-8TYPES / REQ-CAPTURE-PRIVACY 权威在 core
+# ::classify）——capture 依赖 core 单向（DEC-187 分层登记，不涉 gpui/objc）。
+parchora-core = { path = "../parchora-core" }

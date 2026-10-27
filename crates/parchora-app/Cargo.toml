@@ -1,0 +1,27 @@
+[package]
+name = "parchora-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+parchora-ui = { path = "../parchora-ui" }
+parchora-platform = { path = "../parchora-platform" }
+# 任务 6 落盘通道（第八十轮 DEC-129）：.md 原子写/标题推导，files 接口不含 DB 类型。
+parchora-files = { path = "../parchora-files" }
+# TASK-300/506 持久化接线（DEC-187）：clips/todos SQLite 落库（parchora-db）＋
+# 剪贴板捕捉状态机（parchora-capture · trait 注入生产桥）＋领域投影类型（core）。
+parchora-db = { path = "../parchora-db" }
+parchora-capture = { path = "../parchora-capture" }
+parchora-core = { path = "../parchora-core" }
+gpui-fast = "0.1.8"
+gpui-fast-platform = { version = "0.1.8", features = ["runtime_shaders", "font-kit"] }
+
+[features]
+# G1 帧遥测（性能轮 · DEC-215）：编译期挂 gpui-fast `profiler` feature（帧级
+# FrameTiming/PresentTiming 采集面 · vendor 既有 opt-in，零 vendor 改动）；运行期
+# `PARCHORA_FRAME_TELEMETRY=1` 激活。默认构建不启用——常规运行零行为变化。
+frame-profiler = ["gpui-fast/profiler"]
+
+[dev-dependencies]
+# 进程内确定性仿真（app 层 Peek 单实例/防争集成测试）——仅测试构建生效。
+gpui-fast = { version = "0.1.8", features = ["test-support"] }

@@ -1,0 +1,18 @@
+[package]
+name = "editor-spike"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+gpui-component = { version = "0.7.3", features = ["gpui-fast"] }
+gpui-fast = "0.1.8"
+gpui-fast-platform = { version = "0.1.8", features = ["runtime_shaders"] }
+
+# [冲突#9] 裁决 = B（DEC-59）：gpui-fast 0.1.8 线 vendored。
+# 唯一必需 vendored 点 = park_offscreen 原语（停放屏外/还原）；canBecomeKey 等
+# 其余 EdgeMark 能力上游已原生覆盖（见 patches/README 能力矩阵）。
+[patch.crates-io]
+gpui-fast = { path = "../../vendor/gpui-fast" }
+gpui-fast-macos = { path = "../../vendor/gpui-fast-macos" }
