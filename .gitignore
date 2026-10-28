@@ -1,5 +1,15 @@
+# ── Build output ────────────────────────────────────────────────
+# Covers the workspace target/, every vendored crate's target/, and the
+# standalone Cargo projects under spikes/.
 **/target
 **/dist
-**/e2e
+
+# ── E2E run artifacts ───────────────────────────────────────────
+# Only the OUTPUTS of e2e/run_e2e.py, run_deep52.py and audit_visual.py are
+# ignored. The scripts themselves (harness.py, run_e2e.py, run_deep52.py,
+# audit_visual.py) are source and MUST stay tracked.
+e2e/
+
+# ── OS / editor / tooling ───────────────────────────────────────
 **/.DS_Store
 .loop-fab/
