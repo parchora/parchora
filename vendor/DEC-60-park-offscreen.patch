@@ -1,0 +1,262 @@
+diff --git a/gpui-fast-macos/src/window.rs b/gpui-fast-macos/src/window.rs
+index 262a59e..6e7c710 100644
+--- a/gpui-fast-macos/src/window.rs
++++ b/gpui-fast-macos/src/window.rs
+@@ -711,6 +711,8 @@ pub(crate) struct MacWindowState {
+     select_previous_tab_callback: Option<Box<dyn FnMut()>>,
+     toggle_tab_bar_callback: Option<Box<dyn FnMut()>>,
+     activated_least_once: bool,
++    // Vendored (DEC-59)：停放屏外时的原 frame 缓存，unpark 用 setFrame:display: 全量还原。
++    parked_frame: Option<Objc2NSRect>,
+     closed: Arc<AtomicBool>,
+     accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
+     // The parent window if this window is a sheet (Dialog kind)
+@@ -1151,6 +1153,7 @@ impl MacWindow {
+                 select_previous_tab_callback: None,
+                 toggle_tab_bar_callback: None,
+                 activated_least_once: false,
++                parked_frame: None,
+                 closed: Arc::new(AtomicBool::new(false)),
+                 accesskit_adapter: None,
+                 sheet_parent: None,
+@@ -1462,6 +1465,39 @@ impl PlatformWindow for MacWindow {
+             .detach();
+     }
+ 
++    fn park_offscreen(&mut self, park: bool) {
++        // Vendored (DEC-59)：与下方 activate() 同一 async + closed 守卫模式；
++        // -32000/-31000 为经典屏外停放点，unpark 用 setFrame:display: 全量还原（位置+尺寸）。
++        // 锁纪律：AppKit setFrame* 会同步回调 NSWindowDelegate（didMove/didResize），
++        // delegate 亦会 lock 同一 MacWindowState——objc 调用一律不得持锁执行，
++        // 否则同线程重入 parking_lot Mutex 即主队列死锁（真机 spike 已复现）。
++        let this = Arc::clone(&self.0);
++        let window = this.lock().native_window;
++        let closed = this.lock().closed.clone();
++        let executor = this.lock().foreground_executor.clone();
++        executor
++            .spawn(async move {
++                if closed.load(Ordering::Acquire) {
++                    return;
++                }
++                let window = unsafe { &*window.cast::<Objc2NSWindow>() };
++                if park {
++                    let frame = window.frame();
++                    window.setFrameOrigin(Objc2NSPoint::new(-32000., -31000.));
++                    this.lock().parked_frame = Some(frame);
++                } else {
++                    // 注意：临时 guard 只允许跨 take() 本身，不得横跨 setFrame——
++                    // if let Some(f) = this.lock().x.take() { objc(...) } 的 guard
++                    // 生存期会延伸到 else 分支结束，重入 delegate 锁即死锁。
++                    let frame = this.lock().parked_frame.take();
++                    if let Some(frame) = frame {
++                        window.setFrame_display(frame, true);
++                    }
++                }
++            })
++            .detach();
++    }
++
+     fn merge_all_windows(&self) {
+         let native_window = self.0.lock().native_window;
+         extern "C" fn merge_windows_async(context: *mut std::ffi::c_void) {
+@@ -2643,6 +2679,13 @@ extern "C" fn handle_key_up(this: &Object, _: Sel, native_event: id) {
+ ///    that map keys directly without composition.
+ /// 2. The source is not ASCII-capable, which excludes modes like Japanese Romaji that
+ ///    produce ASCII characters and should allow multi-stroke keybindings like `jj`.
++/// IME 闸门诊断开关（第八十一轮 DEC-130 · vendored 补丁面）：PARCHORA_IME_DIAG=1
++/// 时打印键下事件改道组件；默认关闭零开销。
++fn ime_diag_enabled() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var("PARCHORA_IME_DIAG").as_deref() == Ok("1"))
++}
++
+ unsafe fn is_ime_input_source_active() -> bool {
+     unsafe {
+         let source = TISCopyCurrentKeyboardInputSource();
+@@ -2741,6 +2784,31 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent:
+                 })
+                 .unwrap_or(false);
+ 
++            // 第八十一轮 IME 诊断（DEC-130 · vendored 补丁面）：可打印键改道判定
++            // 全量组件打印（真机人工腿取证 · PARCHORA_IME_DIAG=1 门控，默认关）。
++            if ime_diag_enabled() {
++                let tis = unsafe { is_ime_input_source_active() };
++                let installed = with_input_handler(this, |_h| true).unwrap_or(false);
++                let prefers = with_input_handler(this, |input_handler| {
++                    input_handler.query_prefers_ime_for_printable_keys()
++                })
++                .unwrap_or(false);
++                eprintln!(
++                    "[parchora-ime-diag] key={:?} key_char={:?} composing={} ctrl={} fn={} cmd={} key_equiv={} tis_active={} handler_installed={} query_prefers={} -> ime_route={}",
++                    key_down_event.keystroke.key,
++                    key_down_event.keystroke.key_char,
++                    is_composing,
++                    key_down_event.keystroke.modifiers.control,
++                    key_down_event.keystroke.modifiers.function,
++                    key_down_event.keystroke.modifiers.platform,
++                    key_equivalent,
++                    tis,
++                    installed,
++                    prefers,
++                    is_composing || is_ime_printable_key
++                );
++            }
++
+             if is_composing
+                 || is_ime_printable_key
+                 || (key_down_event.keystroke.key_char.is_none()
+@@ -3473,6 +3541,10 @@ extern "C" fn insert_text(this: &Object, _: Sel, text: id, replacement_range: NS
+ 
+         let text = text.to_str();
+         let replacement_range = replacement_range.to_range();
++        // 第九十九轮 IME 会话追踪（DEC-155 · DEC-130 诊断面延伸）：协议层提交事件
++        if ime_diag_enabled() {
++            eprintln!("[parchora-ime-diag] client insert_text {text:?}");
++        }
+         with_input_handler(this, |input_handler| {
+             input_handler.replace_text_in_range(replacement_range, text)
+         });
+@@ -3497,12 +3569,19 @@ extern "C" fn set_marked_text(
+         let selected_range = selected_range.to_range();
+         let replacement_range = replacement_range.to_range();
+         let text = text.to_str();
++        // 第九十九轮 IME 会话追踪（DEC-155 · DEC-130 诊断面延伸）：组合挂载事件
++        if ime_diag_enabled() {
++            eprintln!("[parchora-ime-diag] client set_marked_text {text:?}");
++        }
+         with_input_handler(this, |input_handler| {
+             input_handler.replace_and_mark_text_in_range(replacement_range, text, selected_range)
+         });
+     }
+ }
+ extern "C" fn unmark_text(this: &Object, _: Sel) {
++    if ime_diag_enabled() {
++        eprintln!("[parchora-ime-diag] client unmark_text");
++    }
+     with_input_handler(this, |input_handler| input_handler.unmark_text());
+ }
+ 
+@@ -3538,6 +3617,9 @@ extern "C" fn attributed_substring_for_proposed_range(
+ // We ignore which selector it asks us to do because the user may have
+ // bound the shortcut to something else.
+ extern "C" fn do_command_by_selector(this: &Object, _: Sel, _: Sel) {
++    if ime_diag_enabled() {
++        eprintln!("[parchora-ime-diag] client do_command");
++    }
+     let state = unsafe { get_window_state(this) };
+     let mut lock = state.as_ref().lock();
+     let keystroke = lock.keystroke_for_do_command.take();
+diff --git a/gpui-fast/src/platform.rs b/gpui-fast/src/platform.rs
+index 49c9b83..43b37c0 100644
+--- a/gpui-fast/src/platform.rs
++++ b/gpui-fast/src/platform.rs
+@@ -1217,6 +1217,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+         false
+     }
+     fn resize(&mut self, size: Size<Pixels>);
++    /// Vendored (DEC-59)：停放/还原窗口——以停放屏外替代 orderOut/hide，保持 AppKit
++    /// key/space 语义（AGENTS.md：停放屏外、从不 orderOut）。
++    /// 默认空实现：产品为 macOS-only（DEC-36/37），其余后端零连带改动。
++    fn park_offscreen(&mut self, park: bool) {
++        let _ = park;
++    }
+     fn scale_factor(&self) -> f32;
+     fn appearance(&self) -> WindowAppearance;
+     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;
+@@ -2003,6 +2009,13 @@ pub struct PlatformInputHandler {
+     handler: Box<dyn InputHandler>,
+ }
+ 
++/// IME 闸门诊断开关（第八十一轮 DEC-130 · vendored 补丁面）：PARCHORA_IME_DIAG=1
++/// 时打印可打印键的 IME 改道判定全量状态；默认关闭零开销。
++fn ime_diag_enabled() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var("PARCHORA_IME_DIAG").as_deref() == Ok("1"))
++}
++
+ #[expect(missing_docs)]
+ #[cfg_attr(
+     all(
+@@ -2212,13 +2225,27 @@ impl PlatformInputHandler {
+     /// returns `false` regardless of the handler's preference, because the next printable key may
+     /// complete a binding whose prefix already bypassed the IME.
+     pub fn query_prefers_ime_for_printable_keys(&mut self) -> bool {
++        // 第八十一轮 IME 诊断（DEC-130 · vendored 补丁面 · PARCHORA_IME_DIAG=1 门控）：
++        // 把门 e）两段（挂起/处理器偏好）与上下文更新失败路径分面打印——真机人
++        // 工腿取证用；默认关闭零开销。
+         self.cx
+             .update(|window, cx| {
+-                // The next printable key may complete a chord whose prefix bypassed the IME.
+-                !window.has_pending_keystrokes()
+-                    && self.handler.prefers_ime_for_printable_keys(window, cx)
++                let pending_ok = !window.has_pending_keystrokes();
++                let prefers = self.handler.prefers_ime_for_printable_keys(window, cx);
++                if ime_diag_enabled() {
++                    eprintln!(
++                        "[parchora-ime-diag] query_prefers: pending_ok={} handler_prefers={}",
++                        pending_ok, prefers
++                    );
++                }
++                pending_ok && prefers
++            })
++            .unwrap_or_else(|e| {
++                if ime_diag_enabled() {
++                    eprintln!("[parchora-ime-diag] query_prefers err: {e}");
++                }
++                false
+             })
+-            .unwrap_or(false)
+     }
+ 
+     /// See [`InputHandler::text_input_configuration`].
+@@ -2421,8 +2448,17 @@ pub trait InputHandler: 'static {
+     /// Defaults to `false`. The editor overrides this based on whether it expects
+     /// character input (e.g. Vim insert mode returns `true`, normal mode returns `false`).
+     /// The terminal keeps the default `false` so that raw keys reach the terminal process.
++    ///
++    /// Parchora fork（DEC-132 · 第八十三轮 vendored 补丁面）：默认改为 `true`。理由：
++    /// ①本产品无 terminal、无编辑器模式切换（无 Vim/normal 模式需求）；②本仓全部
++    /// InputHandler 消费者＝gpui-base 输入引擎家族（正文/题名/查找框），皆为
++    /// 文本编辑上下文且均未覆写本方法——上游默认 false 时 CJK 输入源（中文等）
++    /// 五段门恒关，可打印键直落 run_callback 直插 key_char（CJK 源下 NSEvent
++    /// characters 即大写形态）→ 症状＝中文输入法下只能打出大写英文；③ASCII 源
++    /// 已被 is_ime_input_source_active()（type=keyboard input mode 且非
++    /// ascii-capable）挡在门外，ABC 输入面路径不变。
+     fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, _cx: &mut App) -> bool {
+-        false
++        true
+     }
+ 
+     /// Get this handler's preferences for platform text assistance.
+diff --git a/gpui-fast/src/window.rs b/gpui-fast/src/window.rs
+index 574a9ed..db39c14 100644
+--- a/gpui-fast/src/window.rs
++++ b/gpui-fast/src/window.rs
+@@ -2914,6 +2914,12 @@ impl Window {
+         self.platform_window.resize(size);
+     }
+ 
++    /// 停放/还原窗口（vendored，DEC-59）：停放屏外而非 orderOut/hide，
++    /// 保持 AppKit key/space 语义（AGENTS.md：停放屏外、从不 orderOut）。
++    pub fn park_offscreen(&mut self, park: bool) {
++        self.platform_window.park_offscreen(park);
++    }
++
+     /// Returns whether or not the window is currently fullscreen
+     pub fn is_fullscreen(&self) -> bool {
+         self.platform_window.is_fullscreen()
+@@ -3519,6 +3525,14 @@ impl Window {
+         self.apply_text_input_configuration(cx);
+         if focused_text_input_active != self.focused_text_input_active {
+             self.focused_text_input_active = focused_text_input_active;
++            // 【Parchora vendored patch · DEC-155】LSUIElement + PopUp 非激活 NSPanel
++            // 组合下 app 永不激活（frontmost=false），IMK 会话不激活 → CJK IME 收键
++            // 拒绝组合（无 setMarkedText）直接 insertText 罗马字符。任一窗口文本
++            // 输入获焦（handler 实际注册即本切换沿）时激活 app，建立 IME 组合的
++            // 会话前提；切换沿触发（每帧已按状态去重），不逐帧重激活。
++            if focused_text_input_active {
++                cx.platform.activate(true);
++            }
+             self.platform_window
+                 .text_input_state_changed(if focused_text_input_active {
+                     TextInputStateChange::FocusGained
